@@ -109,10 +109,11 @@
         <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between gap-4">
             <!-- Brand Identity -->
             <div class="flex items-center gap-3.5">
-                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-400 to-blue-600 flex items-center justify-center shadow-lg shadow-sky-500/20 shrink-0">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-400 to-blue-600 flex items-center justify-center shadow-lg shadow-sky-500/20 shrink-0 overflow-hidden">
                     <img 
-                    src="https://uploads.onecompiler.io/44n6r8jp7/1795015829900/0-02-05-a5afb4b2ee708a7328270b8a87dd4584172d317e45788848d3e5eb213af00343_420ff103f4ebd2b7.jpg"
-                    
+                        src="https://uploads.onecompiler.io/44n6r8jp7/1795015829900/0-02-05-a5afb4b2ee708a7328270b8a87dd4584172d317e45788848d3e5eb213af00343_420ff103f4ebd2b7.jpg"
+                        alt="TIFT Logo"
+                        class="w-full h-full object-cover"
                     >
                 </div>
                 <div>
@@ -142,7 +143,7 @@
     <footer class="border-t border-[#1E293B]/80 py-4 text-center text-xs text-slate-500 font-mono">
         TIFT &bull; Automated Highway Fog Telemetry
     </footer>
-    <pre style="color: #858484; text-align: left;"> By THE INVINCIBLES:
+    <pre style="color: #858484; text-align: left; padding: 16px; max-width: 6xl; margin: 0 auto;"> By THE INVINCIBLES:
    Radislav Karaivanov
    Borislav Karaivanov
    Radoslav Iliev
@@ -152,38 +153,33 @@
 
     <script>
         /* ============================================================================
-         * PROGRAMMER CONFIGURATION (EDIT YOUR ARDUINO CLOUD STORAGE LINKS HERE)
+         * PROGRAMMER CONFIGURATION (ADAFRUIT IO INTEGRATION)
          * ============================================================================ */
         const PROGRAMMER_CONFIG = {
-            // How often to fetch fresh humidity data from Arduino Cloud (in milliseconds)
-            POLL_INTERVAL_MS: 10000,
-            
-            // Automatically close intro GIF splash screen after 9 seconds (adjust if needed)
-            GIF_DURATION_MS: 9000,
+            POLL_INTERVAL_MS: 15000, // 15-second polling interval to prevent rate-limiting
+            GIF_DURATION_MS: 9000,   // Close intro GIF after 9 seconds
 
-            // Optional HTTP headers (e.g., Bearer token if querying Arduino IoT Cloud REST API directly)
+            // Adafruit IO Authentication Headers (Updated Key)
             HEADERS: {
-                // 'Authorization': 'Bearer YOUR_ARDUINO_CLOUD_ACCESS_TOKEN',
+                'X-AIO-Key': 'aio_yBJk09tCfdkZngPkvzOv08zQLdEZ',
                 'Accept': 'application/json'
             },
 
-            // List of monitored highways (add or remove objects as needed)
+            // Connected Highway Sensors via Adafruit IO feed 'humidity'
             HIGHWAYS: [
                 {
                     name: 'АМ "Тракия"',
-                    arduinoCloudUrl: 'YOUR_ARDUINO_CLOUD_URL_HERE',
-                    demoHumidity: 89
+                    arduinoCloudUrl: 'https://io.adafruit.com/api/v2/Radkata90/feeds/humidity/data/last',
+                    demoHumidity: 89 // Fallback demo value if offline
                 }
             ]
         };
 
+        // Cache to store last known good reading per highway so transient errors don't blank out the UI
+        const lastKnownReadings = {};
+
         /* ============================================================================
          * FOG STATUS CALCULATION ENGINE
-         * Rules:
-         *   Under 30  -> CLEAR
-         *   30 - 54   -> MIST RISK
-         *   55 - 79   -> FOG LIKELY
-         *   +80       -> FOG
          * ============================================================================ */
         function calculateFogStatus(humidity) {
             const h = Number(humidity);
@@ -234,7 +230,7 @@
         }
 
         /* ============================================================================
-         * FLEXIBLE ARDUINO CLOUD JSON PAYLOAD PARSER
+         * ADAFRUIT IO JSON PAYLOAD PARSER
          * ============================================================================ */
         function parseArduinoCloudPayload(data) {
             if (typeof data === 'number') {
@@ -250,16 +246,14 @@
                 }
 
                 const rawVal =
-                    item.last_value !== undefined ? item.last_value :
                     item.value !== undefined ? item.value :
-                    item.humidity !== undefined ? item.humidity :
-                    item.Humidity !== undefined ? item.Humidity : null;
+                    item.last_value !== undefined ? item.last_value :
+                    item.humidity !== undefined ? item.humidity : null;
 
                 const rawTime =
-                    item.value_updated_at ||
+                    item.created_at ||
                     item.updated_at ||
                     item.timestamp ||
-                    item.created_at ||
                     item.time;
 
                 const parsedHumidity = rawVal !== null ? Number(rawVal) : null;
@@ -296,11 +290,11 @@
         }
 
         /* ============================================================================
-         * FETCH TELEMETRY FOR EACH HIGHWAY
+         * FETCH TELEMETRY FROM ADAFRUIT IO (WITH FALLBACK CACHE)
          * ============================================================================ */
         async function fetchHighwayTelemetry(highwayConfig) {
             const url = (highwayConfig.arduinoCloudUrl || '').trim();
-            const isPlaceholder = !url || url === 'YOUR_ARDUINO_CLOUD_URL_HERE';
+            const isPlaceholder = !url || url.includes('YOUR_ARDUINO_CLOUD_URL');
 
             if (isPlaceholder) {
                 const base = Number(highwayConfig.demoHumidity ?? 50);
@@ -331,13 +325,23 @@
 
                 const { humidity, timestamp } = parseArduinoCloudPayload(payload);
 
-                return {
-                    name: highwayConfig.name,
-                    humidity,
-                    timestamp
-                };
+                if (humidity !== null && Number.isFinite(humidity)) {
+                    lastKnownReadings[highwayConfig.name] = { humidity, timestamp };
+                    return { name: highwayConfig.name, humidity, timestamp };
+                } else {
+                    throw new Error('Invalid humidity value parsed');
+                }
             } catch (error) {
-                console.error(`[TIFT Programmer Notice] Failed fetching "${highwayConfig.name}" from Arduino Cloud:`, error);
+                console.warn(`[TIFT Notice] Temporary fetch glitch for "${highwayConfig.name}":`, error.message);
+                
+                if (lastKnownReadings[highwayConfig.name]) {
+                    return {
+                        name: highwayConfig.name,
+                        humidity: lastKnownReadings[highwayConfig.name].humidity,
+                        timestamp: lastKnownReadings[highwayConfig.name].timestamp
+                    };
+                }
+
                 return {
                     name: highwayConfig.name,
                     humidity: null,
@@ -347,7 +351,7 @@
         }
 
         /* ============================================================================
-         * RENDER DRIVER-FACING CARDS
+         * RENDER CARDS
          * ============================================================================ */
         function renderHighwayCards(readings) {
             const grid = document.getElementById('highway-grid');
@@ -416,15 +420,7 @@
                 skipIntroBtn.addEventListener('click', closeIntro);
             }
 
-            // Automatically close intro GIF after duration
             setTimeout(closeIntro, PROGRAMMER_CONFIG.GIF_DURATION_MS);
-
-            const usesPlaceholder = PROGRAMMER_CONFIG.HIGHWAYS.some(
-                h => !h.arduinoCloudUrl || h.arduinoCloudUrl === 'YOUR_ARDUINO_CLOUD_URL_HERE'
-            );
-            if (usesPlaceholder) {
-                console.info('[TIFT] Running in preview mode. Paste your Arduino Cloud storage URL(s) into PROGRAMMER_CONFIG at the top of <script>.');
-            }
 
             refreshTelemetry();
             setInterval(refreshTelemetry, PROGRAMMER_CONFIG.POLL_INTERVAL_MS);
